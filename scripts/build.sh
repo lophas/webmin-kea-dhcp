@@ -8,6 +8,7 @@ ARCHIVE="$WORK/webmin-$UPSTREAM_TAG.tar.gz"
 SRC="$WORK/src"
 OUT="$WORK/kea-dhcp"
 URL="https://github.com/webmin/webmin/archive/refs/tags/$UPSTREAM_TAG.tar.gz"
+WEBMIN_ROOT=${WEBMIN_ROOT:-/usr/share/webmin}
 
 rm -rf "$WORK"
 mkdir -p "$WORK" "$SRC"
@@ -33,5 +34,18 @@ for p in "$ROOT"/patches/*.patch; do
   echo "Applying $(basename "$p")"
   patch -d "$WORK" -p1 --forward --batch < "$p"
 done
+
+if [ -f "$WEBMIN_ROOT/WebminCore.pm" ]; then
+  echo "Running Perl syntax checks"
+  (
+    cd "$OUT"
+    perl -I"$WEBMIN_ROOT" -c index.cgi
+    perl -I"$WEBMIN_ROOT" -c edit_subnet.cgi
+    perl -I"$WEBMIN_ROOT" -c runtime.cgi
+    perl -I"$WEBMIN_ROOT" -c kea-dhcp-lib.pl
+  )
+else
+  echo "WebminCore.pm not found under $WEBMIN_ROOT; skipping Webmin-aware Perl syntax checks"
+fi
 
 echo "Built: $OUT"
