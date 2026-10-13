@@ -4,6 +4,12 @@ Local enhancements for Webmin's official `kea-dhcp` module.
 
 This repository deliberately tracks the local changes as a small patch set on top of the official Webmin module instead of vendoring the whole Webmin source tree. This makes upstream updates auditable: bump the Webmin tag, rebuild, resolve any patch conflicts, test, and deploy.
 
+## Release
+
+Current stable release: **v1.0.0** — 2026-10-13.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release history.
+
 ## Baseline
 
 - Upstream: `webmin/webmin`
@@ -33,7 +39,7 @@ See [`docs/CUSTOMIZATIONS.md`](docs/CUSTOMIZATIONS.md) for details.
 ./scripts/build.sh
 ```
 
-This downloads the configured upstream Webmin tag, extracts only `kea-dhcp`, and applies the local patch series. The result is written to `build/kea-dhcp`.
+This downloads the configured upstream Webmin tag, extracts only `kea-dhcp`, applies the local patch series, and runs Webmin-aware Perl syntax checks when `WebminCore.pm` is available. The result is written to `build/kea-dhcp`.
 
 To use another upstream tag for a compatibility test:
 
@@ -41,7 +47,7 @@ To use another upstream tag for a compatibility test:
 UPSTREAM_TAG=2.680 ./scripts/build.sh
 ```
 
-If a patch no longer applies, the build stops rather than silently producing a mixed module.
+If a patch no longer applies or a syntax check fails, the build stops rather than silently producing a mixed module.
 
 ## Install / update
 
@@ -61,7 +67,7 @@ git pull --ff-only
 ./scripts/install.sh
 ```
 
-The installer creates a timestamped backup of the currently installed module before replacing it. It does not modify `/etc/webmin/kea-dhcp/` or `/etc/kea/`.
+The installer creates a timestamped backup of the currently installed module before replacing it, restarts Webmin, verifies that the service is active, and restores the previous module automatically if the restart fails. It does not modify `/etc/webmin/kea-dhcp/` or `/etc/kea/`.
 
 ## Machine-specific metadata
 
