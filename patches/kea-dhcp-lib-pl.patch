@@ -1,0 +1,212 @@
+--- a/kea-dhcp/kea-dhcp-lib.pl
++++ b/kea-dhcp/kea-dhcp-lib.pl
+@@ -888,20 +888,152 @@
+ 
+ # kea_active_leases(version)
+ # Returns active leases for a DHCP version, preserving file/error context.
++# kea_live_leases(version)
++# Reads the current lease database directly from the running Kea server
++# through its control socket and lease_cmds hook.
++sub kea_live_leases
++{
++my ($ver) = @_;
++
++# This installation currently runs DHCPv4 only.
++return ([ ], undef, "live") if ($ver != 4);
++
++my $socket_path = "/run/kea/kea4-ctrl-socket";
++
++eval {
++	require IO::Socket::UNIX;
++	require JSON::PP;
++	require Socket;
++	};
++
++if ($@) {
++	return ([ ], "Cannot load Perl socket/JSON modules: $@", "live");
++	}
++
++if (!-S $socket_path) {
++	return ([ ], "Kea control socket not found: $socket_path", "live");
++	}
++
++my $sock = IO::Socket::UNIX->new(
++	Type => Socket::SOCK_STREAM(),
++	Peer => $socket_path,
++	);
++
++if (!$sock) {
++	return ([ ], "Cannot connect to Kea control socket $socket_path: $!", "live");
++	}
++
++my $request = {
++	'command' => 'lease4-get-all',
++	};
++
++my $json = JSON::PP->new->utf8->canonical;
++my $payload = $json->encode($request) . "\n";
++
++my $written = syswrite($sock, $payload);
++if (!defined($written)) {
++	close($sock);
++	return ([ ], "Cannot write to Kea control socket: $!", "live");
++	}
++
++shutdown($sock, 1);
++
++my $reply = "";
++my $buf;
++
++while (1) {
++	my $n = sysread($sock, $buf, 65536);
++	if (!defined($n)) {
++		close($sock);
++		return ([ ], "Cannot read from Kea control socket: $!", "live");
++		}
++	last if ($n == 0);
++	$reply .= substr($buf, 0, $n);
++	}
++
++close($sock);
++
++my $data;
++eval {
++	$data = $json->decode($reply);
++	};
++
++if ($@) {
++	return ([ ], "Invalid JSON received from Kea: $@", "live");
++	}
++
++# Direct Kea control-socket responses are normally hashes.
++# Accept a one-element array too, to be tolerant of alternate transports.
++if (ref($data) eq 'ARRAY') {
++	$data = $data->[0];
++	}
++
++if (ref($data) ne 'HASH') {
++	return ([ ], "Unexpected Kea control response", "live");
++	}
++
++if (($data->{'result'} // 1) != 0) {
++	return ([ ], $data->{'text'} || "Kea lease query failed", "live");
++	}
++
++my $leases =
++	ref($data->{'arguments'}) eq 'HASH' &&
++	ref($data->{'arguments'}->{'leases'}) eq 'ARRAY' ?
++		$data->{'arguments'}->{'leases'} : [ ];
++
++return ($leases, undef, "live");
++}
++
++# kea_current_leases(version)
++# Returns the lease database currently held by the running Kea server.
++sub kea_current_leases
++{
++my ($ver) = @_;
++return &kea_live_leases($ver);
++}
++
++# kea_active_leases(version)
++# Returns current active leases.
+ sub kea_active_leases
+ {
+ my ($ver) = @_;
+-my ($leases, $err, $file) = &kea_read_leases($ver);
++my ($leases, $err, $file) = &kea_current_leases($ver);
+ return ([ grep { &kea_lease_is_active($_) } @$leases ], $err, $file);
+ }
+ 
++# kea_inactive_leases(version)
++# Returns current inactive/expired lease records.
++sub kea_inactive_leases
++{
++my ($ver) = @_;
++my ($leases, $err, $file) = &kea_current_leases($ver);
++return ([ grep { !&kea_lease_is_active($_) } @$leases ], $err, $file);
++}
++
+ # kea_lease_is_active(&lease)
+-# Returns true for leases Kea still considers usable by clients.
++# Returns true when a lease is currently valid.
++# Live Kea API leases use cltt + valid-lft; CSV leases use expire.
+ sub kea_lease_is_active
+ {
+ my ($lease) = @_;
++
+ my $state = $lease->{'state'};
+ return 0 if (defined($state) && $state ne '' && $state ne '0');
++
++# Live Kea lease_cmds format
++my $cltt = $lease->{'cltt'};
++my $valid =
++	defined($lease->{'valid-lft'}) ?
++		$lease->{'valid-lft'} :
++		$lease->{'valid_lifetime'};
++
++if (defined($cltt) && $cltt =~ /^\d+$/ &&
++    defined($valid) && $valid =~ /^\d+$/) {
++	return 1 if ($valid == 0xffffffff);
++	return ($cltt + $valid) > time() ? 1 : 0;
++	}
++
++# Legacy CSV format fallback
+ my $expire = $lease->{'expire'};
+ return 1 if (!defined($expire) || $expire eq '' || $expire !~ /^\d+$/);
+ return $expire == 0 || $expire > time() ? 1 : 0;
+@@ -912,7 +1044,9 @@
+ sub kea_lease_address
+ {
+ my ($lease) = @_;
+-return $lease->{'address'} || $lease->{'ip_address'} ||
++return $lease->{'ip-address'} ||
++       $lease->{'address'} ||
++       $lease->{'ip_address'} ||
+        $lease->{'prefix'} || "";
+ }
+ 
+@@ -921,8 +1055,12 @@
+ sub kea_lease_identifier
+ {
+ my ($lease) = @_;
+-return $lease->{'hwaddr'} || $lease->{'hw_address'} ||
+-       $lease->{'client_id'} || $lease->{'duid'} ||
++return $lease->{'hw-address'} ||
++       $lease->{'hwaddr'} ||
++       $lease->{'hw_address'} ||
++       $lease->{'client-id'} ||
++       $lease->{'client_id'} ||
++       $lease->{'duid'} ||
+        $lease->{'iaid'} || "";
+ }
+ 
+@@ -931,6 +1069,19 @@
+ sub kea_lease_expires
+ {
+ my ($lease) = @_;
++
++my $cltt = $lease->{'cltt'};
++my $valid =
++	defined($lease->{'valid-lft'}) ?
++		$lease->{'valid-lft'} :
++		$lease->{'valid_lifetime'};
++
++if (defined($cltt) && $cltt =~ /^\d+$/ &&
++    defined($valid) && $valid =~ /^\d+$/) {
++	return $text{'leases_never'} if ($valid == 0xffffffff);
++	return scalar(localtime($cltt + $valid));
++	}
++
+ my $expire = $lease->{'expire'};
+ return $text{'leases_never'} if (defined($expire) && $expire eq '0');
+ return "" if (!defined($expire) || $expire eq '' || $expire !~ /^\d+$/);
+@@ -953,7 +1104,7 @@
+ sub kea_lease_summary
+ {
+ my ($ver) = @_;
+-my ($leases, $err, $file) = &kea_read_leases($ver);
++my ($leases, $err, $file) = &kea_current_leases($ver);
+ my $active = 0;
+ foreach my $lease (@$leases) {
+ 	$active++ if (&kea_lease_is_active($lease));

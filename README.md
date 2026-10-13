@@ -1,61 +1,74 @@
-# Webmin Kea DHCP — local enhanced edition
+# Webmin Kea DHCP — enhanced local edition
 
-A locally maintained variant of Webmin's official `kea-dhcp` module, based on
-Webmin **2.670**, with operational enhancements for a DHCPv4-focused home/LAN
-installation.
+Local enhancements for Webmin's official `kea-dhcp` module.
 
-## Upstream
+This repository deliberately tracks the local changes as a small patch set on top of the official Webmin module instead of vendoring the whole Webmin source tree. This makes upstream updates auditable: bump the Webmin tag, rebuild, resolve any patch conflicts, test, and deploy.
 
-- Project: `webmin/webmin`
+## Baseline
+
+- Upstream: `webmin/webmin`
 - Module: `kea-dhcp`
-- Baseline: Webmin tag `2.670`
-- Upstream module was introduced in Webmin 2.650.
-
-This repository retains the upstream BSD-3-Clause license.
+- Current baseline: Webmin `2.670`
+- License: BSD-3-Clause (same as Webmin)
 
 ## Local enhancements
 
-The current branch adds:
-
-- DHCPv4-focused module index (DHCPv6 and DHCP-DDNS tabs hidden from the main UI)
-- Numeric IPv4 sorting for reservations and runtime tables
-- Runtime overview combining leases and configured reservations
-- Separate views for active, inactive dynamic, reserved, and free addresses
+- DHCPv4-focused main UI
+- Numeric IPv4 ordering for reservations and runtime tables
+- Runtime overview joining leases and configured reservations
+- Active, inactive dynamic, reserved and free-address views
 - Reserved/dynamic lease classification
-- Free-address calculation from configured DHCPv4 pools
-- Passive client-presence indication using the kernel neighbor table (`ip neigh`)
+- Free-address calculation from configured pools
+- Passive client-presence state using `ip neigh`
 - Optional ASUS client metadata from `/etc/webmin/kea-dhcp/asus-clients.json`
-- Reservation hostname priority over DHCP-supplied and ASUS-discovered names
-- Direct live lease retrieval from the running Kea DHCPv4 server using the
-  control socket and the `lease4-get-all` command, instead of treating the
-  append-oriented memfile CSV as authoritative runtime state
-- Current-lease de-duplication / activity handling for legacy lease data paths
+- Reservation hostname priority over DHCP/ASUS-discovered names
+- Live DHCPv4 lease retrieval through the Kea control socket (`lease4-get-all`)
+- Lease de-duplication/activity handling for legacy memfile data paths
 
 See [`docs/CUSTOMIZATIONS.md`](docs/CUSTOMIZATIONS.md) for details.
 
-## Installation
-
-Run as root on the Webmin host:
+## Build
 
 ```bash
+./scripts/build.sh
+```
+
+This downloads the configured upstream Webmin tag, extracts only `kea-dhcp`, and applies the local patch series. The result is written to `build/kea-dhcp`.
+
+To use another upstream tag for a compatibility test:
+
+```bash
+UPSTREAM_TAG=2.680 ./scripts/build.sh
+```
+
+If a patch no longer applies, the build stops rather than silently producing a mixed module.
+
+## Install / update
+
+Run on the Webmin host as root:
+
+```bash
+git clone https://github.com/lophas/webmin-kea-dhcp.git /opt/webmin-kea-dhcp
+cd /opt/webmin-kea-dhcp
 ./scripts/install.sh
 ```
 
-The installer backs up the currently installed module before replacing it.
-It does **not** modify `/etc/webmin/kea-dhcp/` or the Kea daemon configuration.
+For subsequent updates:
 
-## Local metadata
+```bash
+cd /opt/webmin-kea-dhcp
+git pull --ff-only
+./scripts/install.sh
+```
 
-ASUS metadata, when used, is expected in:
+The installer creates a timestamped backup of the currently installed module before replacing it. It does not modify `/etc/webmin/kea-dhcp/` or `/etc/kea/`.
+
+## Machine-specific metadata
+
+Optional ASUS metadata is read at runtime from:
 
 ```text
 /etc/webmin/kea-dhcp/asus-clients.json
 ```
 
-This machine-specific file is deliberately not part of the repository.
-
-## Maintenance model
-
-Treat `webmin/webmin` as upstream. When Webmin changes the official `kea-dhcp`
-module, compare the new upstream version with this repository, rebase/merge the
-local changes, test, and then deploy with `scripts/install.sh`.
+That file is intentionally not stored in Git.

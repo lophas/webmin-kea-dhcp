@@ -1,0 +1,68 @@
+--- a/kea-dhcp/index.cgi
++++ b/kea-dhcp/index.cgi
+@@ -1,4 +1,4 @@
+-#!/usr/local/bin/perl
++#!/usr/bin/perl
+ # Display Kea DHCP service and configuration status.
+ 
+ use strict;
+@@ -42,10 +42,6 @@
+ my @tabs;
+ push(@tabs, [ 'dhcp4', $text{'tab_dhcp4'} ])
+ 	if (&kea_can_view_dhcp(\%access, 4));
+-push(@tabs, [ 'dhcp6', $text{'tab_dhcp6'} ])
+-	if (&kea_can_view_dhcp(\%access, 6));
+-push(@tabs, [ 'ddns', $text{'tab_ddns'} ])
+-	if (&kea_can_view_ddns(\%access));
+ push(@tabs, [ 'services', $text{'tab_services'} ])
+ 	if (&kea_can_view_services(\%access));
+ 
+@@ -61,18 +57,6 @@
+ 		print &ui_tabs_end_tab("mode", "dhcp4");
+ 		}
+ 
+-	if (&kea_can_view_dhcp(\%access, 6)) {
+-		print &ui_tabs_start_tab("mode", "dhcp6");
+-		&print_dhcp_tab(6);
+-		print &ui_tabs_end_tab("mode", "dhcp6");
+-		}
+-
+-	if (&kea_can_view_ddns(\%access)) {
+-		print &ui_tabs_start_tab("mode", "ddns");
+-		&print_ddns_tab();
+-		print &ui_tabs_end_tab("mode", "ddns");
+-		}
+-
+ 	if (&kea_can_view_services(\%access)) {
+ 		print &ui_tabs_start_tab("mode", "services");
+ 		print &ui_div($text{'index_services_desc'});
+@@ -317,6 +301,7 @@
+ # Each row combines three sources of truth: configured module paths, live daemon
+ # state, and parsed config summaries.
+ foreach my $c (&kea_components()) {
++	next if ($c->{'id'} ne 'dhcp4');
+ 	my $file = &kea_config_file($c);
+ 	my $status = &kea_component_status($c);
+ 	my ($root, $err) = &kea_read_component_config($c);
+@@ -365,7 +350,7 @@
+ 
+ # Global settings shortcuts are shown only when the backing config exists and
+ # the user can edit that protocol.
+-foreach my $ver (4, 6) {
++foreach my $ver (4) {
+ 	my $c = &kea_dhcp_component($ver);
+ 	next if (!&kea_config_file($c) ||
+ 		 !&kea_can_edit_dhcp(\%access, $ver));
+@@ -374,12 +359,6 @@
+ 		&text('index_global_settingsdesc', $ver),
+ 		[ [ "version", $ver ] ]);
+ 	}
+-my $ddns = &kea_component('ddns');
+-if (&kea_config_file($ddns) && &kea_can_edit_ddns(\%access)) {
+-	print &ui_buttons_row("edit_ddns.cgi",
+-		$text{'index_ddns_settings'},
+-		$text{'index_ddns_settingsdesc'});
+-	}
+ if (&kea_can_view_runtime(\%access)) {
+ 	print &ui_buttons_row("runtime.cgi",
+ 		$text{'index_runtime_status'},

@@ -1,0 +1,6 @@
+build/
+*.before-*
+*.bak
+*.orig
+*~
+.DS_Store

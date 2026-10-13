@@ -1,0 +1,8 @@
+--- a/kea-dhcp/module.info
++++ b/kea-dhcp/module.info
+@@ -5,3 +5,5 @@
+ longdesc=Manage ISC Kea DHCP configuration files and service state.
+ rpm_recommends=kea
+ deb_recommends=kea-dhcp4-server kea-dhcp6-server kea-dhcp-ddns-server kea-ctrl-agent kea-admin
++version=2.670
++depends=2.670

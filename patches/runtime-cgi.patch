@@ -1,0 +1,799 @@
+--- a/kea-dhcp/runtime.cgi
++++ b/kea-dhcp/runtime.cgi
+@@ -1,4 +1,4 @@
+-#!/usr/local/bin/perl
++#!/usr/bin/perl
+ # Display Kea runtime lease, pool, statistics, and log information.
+ 
+ use strict;
+@@ -15,15 +15,23 @@
+ # Keep runtime views grouped in one page so the module index stays focused on
+ # configuration, while admins still get the operational data old dhcpd exposed.
+ my @tabs = (
++	[ 'overview', "Overview" ],
+ 	[ 'active', $text{'tab_leases_active'} ],
++	[ 'inactive', "Inactive dynamic" ],
++	[ 'reserved', "Reserved addresses" ],
++	[ 'free', "Free addresses" ],
+ 	[ 'pools', $text{'tab_leases_pools'} ],
+ 	[ 'stats', $text{'tab_leases_stats'} ],
+ 	[ 'logs', $text{'tab_leases_logs'} ],
+ 	);
+ my %valid = map { $_->[0] => 1 } @tabs;
+-my $mode = $in{'mode'} && $valid{$in{'mode'}} ? $in{'mode'} : 'active';
++my $mode = $in{'mode'} && $valid{$in{'mode'}} ? $in{'mode'} : 'overview';
+ print &ui_tabs_start(\@tabs, "mode", $mode, 1);
+ 
++print &ui_tabs_start_tab("mode", "overview");
++&print_lease_overview(4);
++print &ui_tabs_end_tab("mode", "overview");
++
+ print &ui_tabs_start_tab("mode", "active");
+ my ($dhcp4_lease_file) = &kea_lease_file(4);
+ my ($dhcp6_lease_file) = &kea_lease_file(6);
+@@ -34,6 +42,19 @@
+ &print_active_leases(6);
+ print &ui_tabs_end_tab("mode", "active");
+ 
++print &ui_tabs_start_tab("mode", "inactive");
++&print_inactive_leases(4);
++&print_inactive_leases(6);
++print &ui_tabs_end_tab("mode", "inactive");
++
++print &ui_tabs_start_tab("mode", "reserved");
++&print_reserved_addresses(4);
++print &ui_tabs_end_tab("mode", "reserved");
++
++print &ui_tabs_start_tab("mode", "free");
++&print_free_addresses();
++print &ui_tabs_end_tab("mode", "free");
++
+ print &ui_tabs_start_tab("mode", "pools");
+ print &ui_div($text{'leases_pools_desc'});
+ &print_pool_usage(4);
+@@ -59,6 +80,30 @@
+ {
+ my ($ver) = @_;
+ my ($leases, $err) = &kea_active_leases($ver);
++my $reserved = &kea_runtime_reservation_map($ver);
++my $reservations = &kea_runtime_all_reservations($ver);
++
++# Administrator-defined reservation hostnames take precedence over
++# DHCP-supplied and ASUS-discovered names.
++my %reservation_hostname;
++
++foreach my $r (@$reservations) {
++	my $ip = &kea_runtime_reservation_address($r);
++	next if (!$ip);
++
++	my $hostname = $r->{'hostname'} || "";
++	next if ($hostname eq "");
++
++	my $identifier = lc(&kea_runtime_reservation_identifier($r) || "");
++	$identifier =~ s/^\s+|\s+$//g;
++
++	if ($identifier ne "") {
++		$reservation_hostname{"id|".$ip."|".$identifier} = $hostname;
++		}
++
++	$reservation_hostname{"ip|".$ip} = $hostname;
++	}
++
+ print &ui_subheading(&text('comp_dhcp'.$ver));
+ &print_lease_error_notice($err);
+ return if ($err);
+@@ -74,19 +119,714 @@
+ 	$text{'col_id'},
+ 	$text{'col_identifier'},
+ 	$text{'col_hostname'},
++	"Device / Vendor",
++	"Type",
+ 	$text{'col_expires'},
+ 	$text{'col_state'},
+ 	], 100);
++my @sorted_leases = sort {
++	my $aa = &kea_lease_address($a);
++	my $bb = &kea_lease_address($b);
++
++	my @a = split(/\./, $aa);
++	my @b = split(/\./, $bb);
++
++	if (@a == 4 && @b == 4 &&
++	    !grep { $_ !~ /^\d+$/ } (@a, @b)) {
++		$a[0] <=> $b[0] ||
++		$a[1] <=> $b[1] ||
++		$a[2] <=> $b[2] ||
++		$a[3] <=> $b[3];
++		}
++	else {
++		$aa cmp $bb;
++		}
++	} @$leases;
++
++foreach my $lease (@sorted_leases) {
++	my $identifier = &kea_lease_identifier($lease);
++	my $addr = &kea_lease_address($lease);
++
++	my $lookup_id = lc($identifier || "");
++	$lookup_id =~ s/^\s+|\s+$//g;
++
++	my $reservation_name =
++		$reservation_hostname{"id|".$addr."|".$lookup_id} ||
++		$reservation_hostname{"ip|".$addr} ||
++		"";
++
++	my $hostname = $reservation_name ne "" ?
++		$reservation_name :
++		&kea_runtime_display_hostname(
++			$lease->{'hostname'} || "", $identifier);
++
++	my $device = &kea_runtime_device_vendor($identifier);
++
++	print &ui_columns_row([
++		&html_escape(&kea_lease_address($lease)),
++		&html_escape($lease->{'subnet_id'} || $lease->{'subnet-id'} || ""),
++		&html_escape($identifier),
++		&html_escape($hostname),
++		&html_escape($device),
++		&html_escape(&kea_runtime_lease_type($lease, $reserved, $ver)),
++		&html_escape(&kea_lease_expires($lease)),
++		&html_escape(&kea_lease_state($lease)),
++		]);
++	}
++print &ui_columns_end();
++}
++
++
++# ASUS client metadata imported from the router ClientList CSV.
++# This is display-only metadata; nothing is written back to Kea.
++our $kea_runtime_asus_metadata_cache;
++
++sub kea_runtime_asus_metadata
++{
++return $kea_runtime_asus_metadata_cache
++	if (ref($kea_runtime_asus_metadata_cache) eq 'HASH');
++
++my $file = "/etc/webmin/kea-dhcp/asus-clients.json";
++my %data;
++
++if (-r $file) {
++	eval {
++		require JSON::PP;
++
++		local $/;
++		open(my $fh, "<", $file) or die $!;
++		my $json = <$fh>;
++		close($fh);
++
++		my $decoded = JSON::PP->new->utf8->decode($json);
++
++		if (ref($decoded) eq 'HASH') {
++			foreach my $mac (keys %$decoded) {
++				my $key = lc($mac || "");
++				$key =~ s/^\s+|\s+$//g;
++				$data{$key} = $decoded->{$mac}
++					if ($key ne '');
++				}
++			}
++		};
++	}
++
++$kea_runtime_asus_metadata_cache = \%data;
++return $kea_runtime_asus_metadata_cache;
++}
++
++# Normalizes an identifier when it is a normal MAC address.
++sub kea_runtime_mac_from_identifier
++{
++my ($id) = @_;
++my $mac = lc($id || "");
++$mac =~ s/^\s+|\s+$//g;
++
++return $mac
++	if ($mac =~ /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/);
++
++return "";
++}
++
++sub kea_runtime_asus_for_identifier
++{
++my ($id) = @_;
++my $mac = &kea_runtime_mac_from_identifier($id);
++return { } if (!$mac);
++
++my $all = &kea_runtime_asus_metadata();
++return $all->{$mac} || { };
++}
++
++# Hostname priority:
++# 1. Kea lease/reservation hostname
++# 2. ASUS Client Name
++sub kea_runtime_display_hostname
++{
++my ($hostname, $identifier) = @_;
++
++return $hostname if (defined($hostname) && $hostname ne '');
++
++my $meta = &kea_runtime_asus_for_identifier($identifier);
++return $meta->{'client_name'} || "";
++}
++
++sub kea_runtime_device_vendor
++{
++my ($identifier) = @_;
++my $meta = &kea_runtime_asus_for_identifier($identifier);
++return $meta->{'device_type'} || "";
++}
++
++# kea_runtime_reservation_map(version)
++# Builds a lookup table of configured reservations for the runtime lease view.
++# DHCPv4 hardware-address reservations are matched using both IP and MAC,
++# avoiding false "Reserved" labels when an address is reused by another client.
++sub kea_runtime_reservation_map
++{
++my ($ver) = @_;
++my (undef, $root, undef, $err) = &kea_read_dhcp_config($ver);
++return { } if ($err || !$root);
++
++my %reserved;
++foreach my $entry (&kea_all_subnets($root, $ver)) {
++	my $subnet = $entry->{'subnet'};
++	next if (ref($subnet->{'reservations'}) ne 'ARRAY');
++
++	foreach my $r (@{$subnet->{'reservations'}}) {
++		my $ip = $r->{'ip-address'} || $r->{'ip_address'} ||
++			 $r->{'prefix'} || "";
++		next if ($ip eq '');
++
++		my $hw = lc($r->{'hw-address'} || $r->{'hw_address'} || "");
++		$hw =~ s/^\s+|\s+$//g;
++
++		if ($hw ne '') {
++			$reserved{"hw|".$ip."|".$hw} = 1;
++			}
++		else {
++			# Keep address-only knowledge for reservation types for which
++			# the lease CSV does not expose a directly comparable identifier.
++			$reserved{"ip|".$ip} = 1;
++			}
++		}
++	}
++return \%reserved;
++}
++
++# kea_runtime_lease_type(&lease, &reservation_map, version)
++# Labels an active lease as Reserved when it matches a configured reservation.
++sub kea_runtime_lease_type
++{
++my ($lease, $reserved, $ver) = @_;
++my $ip = &kea_lease_address($lease);
++my $hw = lc(
++	$lease->{'hw-address'} ||
++	$lease->{'hwaddr'} ||
++	$lease->{'hw_address'} ||
++	""
++);
++$hw =~ s/^\s+|\s+$//g;
++
++return "Reserved"
++	if ($ip ne '' && $hw ne '' &&
++	    $reserved->{"hw|".$ip."|".$hw});
++
++return "Reserved"
++	if ($ip ne '' && $reserved->{"ip|".$ip});
++
++return "Dynamic";
++}
++
++
++# kea_runtime_all_reservations(version)
++# Returns configured reservation rows with their subnet IDs.
++sub kea_runtime_all_reservations
++{
++my ($ver) = @_;
++my (undef, $root, undef, $err) = &kea_read_dhcp_config($ver);
++return [ ] if ($err || !$root);
++
++my @rows;
++
++foreach my $entry (&kea_all_subnets($root, $ver)) {
++	my $subnet = $entry->{'subnet'};
++	my $sid = $subnet->{'id'} || "";
++
++	next if (ref($subnet->{'reservations'}) ne 'ARRAY');
++
++	foreach my $r (@{$subnet->{'reservations'}}) {
++		my %copy = %$r;
++		$copy{'_subnet_id'} = $sid;
++		push(@rows, \%copy);
++		}
++	}
++
++return \@rows;
++}
++
++# kea_runtime_reservation_identifier(reservation)
++sub kea_runtime_reservation_identifier
++{
++my ($r) = @_;
++
++return $r->{'hw-address'} ||
++       $r->{'hw_address'} ||
++       $r->{'client-id'} ||
++       $r->{'client_id'} ||
++       $r->{'duid'} ||
++       $r->{'flex-id'} ||
++       "";
++}
++
++# kea_runtime_reservation_address(reservation)
++sub kea_runtime_reservation_address
++{
++my ($r) = @_;
++
++return $r->{'ip-address'} ||
++       $r->{'ip_address'} ||
++       $r->{'prefix'} ||
++       "";
++}
++
++# kea_runtime_ip_sort(&a, &b)
++# Numeric IPv4 sorting, textual fallback for non-IPv4 values.
++sub kea_runtime_ip_compare
++{
++my ($aa, $bb) = @_;
++
++my @a = split(/\./, $aa || "");
++my @b = split(/\./, $bb || "");
++
++if (@a == 4 && @b == 4 &&
++    !grep { $_ !~ /^\d+$/ } (@a, @b)) {
++	return
++		$a[0] <=> $b[0] ||
++		$a[1] <=> $b[1] ||
++		$a[2] <=> $b[2] ||
++		$a[3] <=> $b[3];
++	}
++
++return ($aa || "") cmp ($bb || "");
++}
++
++# print_lease_overview(version)
++# Combined reservation + current lease overview.
++
++# kea_runtime_neighbor_map()
++# Reads the kernel IPv4 neighbor table once per page request.
++# This is passive presence information; it does not actively probe clients.
++sub kea_runtime_neighbor_map
++{
++my %map;
++
++my $cmd = "/usr/sbin/ip neigh show dev eth0 2>/dev/null";
++
++if (open(my $fh, "-|", "/bin/sh", "-c", $cmd)) {
++	while (my $line = <$fh>) {
++		chomp($line);
++
++		my ($ip) = $line =~ /^(\d+\.\d+\.\d+\.\d+)/;
++		next if (!$ip);
++
++		my ($state) = $line =~
++			/\b(REACHABLE|STALE|DELAY|PROBE|FAILED|INCOMPLETE|PERMANENT|NOARP)\b/;
++
++		next if (!$state);
++
++		if ($state eq "REACHABLE" ||
++		    $state eq "DELAY" ||
++		    $state eq "PROBE" ||
++		    $state eq "PERMANENT" ||
++		    $state eq "NOARP") {
++			$map{$ip} = "Online";
++			}
++		elsif ($state eq "STALE") {
++			$map{$ip} = "Recently seen";
++			}
++		else {
++			$map{$ip} = "Not currently seen";
++			}
++		}
++
++	close($fh);
++	}
++
++return \%map;
++}
++
++# kea_runtime_presence(address, map)
++sub kea_runtime_presence
++{
++my ($addr, $map) = @_;
++
++return "Not currently seen"
++	if (!$addr || ref($map) ne "HASH");
++
++return $map->{$addr} || "Not currently seen";
++}
++
++sub print_lease_overview
++{
++my ($ver) = @_;
++my $presence = &kea_runtime_neighbor_map();
++
++my ($leases, $err) = &kea_current_leases($ver);
++my $reservations = &kea_runtime_all_reservations($ver);
++my $reserved_map = &kea_runtime_reservation_map($ver);
++
++print &ui_subheading(&text('comp_dhcp'.$ver));
++&print_lease_error_notice($err);
++return if ($err);
++
++my %rows;
++
++# Reservation hostnames are administrator-defined names, so they take
++# precedence over DHCP-supplied and ASUS-discovered client names.
++my %reservation_hostname;
++
++foreach my $r (@$reservations) {
++	my $ip = &kea_runtime_reservation_address($r);
++	next if (!$ip);
++
++	my $hostname = $r->{'hostname'} || "";
++	next if ($hostname eq "");
++
++	my $identifier = lc(&kea_runtime_reservation_identifier($r) || "");
++	$identifier =~ s/^\s+|\s+$//g;
++
++	if ($identifier ne "") {
++		$reservation_hostname{"id|".$ip."|".$identifier} = $hostname;
++		}
++
++	# Fallback for non-MAC reservation identifier types.
++	$reservation_hostname{"ip|".$ip} = $hostname;
++	}
++
++# Current lease records first.
+ foreach my $lease (@$leases) {
++	my $addr = &kea_lease_address($lease);
++	next if (!$addr);
++
++	my $active = &kea_lease_is_active($lease);
++
++	my $identifier = &kea_lease_identifier($lease);
++
++	my $lookup_id = lc($identifier || "");
++	$lookup_id =~ s/^\s+|\s+$//g;
++
++	my $reservation_name =
++		$reservation_hostname{"id|".$addr."|".$lookup_id} ||
++		$reservation_hostname{"ip|".$addr} ||
++		"";
++
++	my $hostname = $reservation_name ne "" ?
++		$reservation_name :
++		&kea_runtime_display_hostname(
++			$lease->{'hostname'} || "", $identifier);
++
++	$rows{$addr} = {
++		'address' => $addr,
++		'id' => $lease->{'subnet_id'} || $lease->{'subnet-id'} || "",
++		'identifier' => $identifier,
++		'hostname' => $hostname,
++		'device' => &kea_runtime_device_vendor($identifier),
++		'type' => &kea_runtime_lease_type($lease, $reserved_map, $ver),
++		'status' => $active ? "Active" : "Inactive",
++		'expires' => &kea_lease_expires($lease),
++		};
++	}
++
++# Add reservations which currently have no lease record.
++foreach my $r (@$reservations) {
++	my $addr = &kea_runtime_reservation_address($r);
++	next if (!$addr);
++
++	if (!$rows{$addr}) {
++		my $identifier = &kea_runtime_reservation_identifier($r);
++		my $hostname = &kea_runtime_display_hostname(
++			$r->{'hostname'} || "", $identifier);
++
++		$rows{$addr} = {
++			'address' => $addr,
++			'id' => $r->{'_subnet_id'} || "",
++			'identifier' => $identifier,
++			'hostname' => $hostname,
++			'device' => &kea_runtime_device_vendor($identifier),
++			'type' => "Reserved",
++			'status' => "No lease",
++			'expires' => "",
++			};
++		}
++	}
++
++my @rows = sort {
++	&kea_runtime_ip_compare($a->{'address'}, $b->{'address'})
++	} values %rows;
++
++print &ui_columns_start([
++	"Address",
++	"ID",
++	"Identifier",
++	"Hostname",
++	"Device / Vendor",
++	"Type",
++	"Lease status",
++	"Presence",
++	"Expires",
++	], 100);
++
++foreach my $row (@rows) {
++	print &ui_columns_row([
++		&html_escape($row->{'address'}),
++		&html_escape($row->{'id'}),
++		&html_escape($row->{'identifier'}),
++		&html_escape($row->{'hostname'}),
++		&html_escape($row->{'device'} || ""),
++		&html_escape($row->{'type'}),
++		&html_escape($row->{'status'}),
++		&html_escape(&kea_runtime_presence(
++			$row->{'address'}, $presence)),
++		&html_escape($row->{'expires'}),
++		]);
++	}
++
++print &ui_columns_end();
++}
++
++# print_inactive_leases(version)
++sub print_inactive_leases
++{
++my ($ver) = @_;
++
++my ($leases, $err) = &kea_inactive_leases($ver);
++my $reserved = &kea_runtime_reservation_map($ver);
++
++print &ui_subheading(&text('comp_dhcp'.$ver));
++&print_lease_error_notice($err);
++return if ($err);
++
++# Only dynamic expired/reclaimed leases belong here.
++my @rows = grep {
++	my $type = &kea_runtime_lease_type($_, $reserved, $ver);
++	$type ne "Reserved";
++	} @$leases;
++
++@rows = sort {
++	&kea_runtime_ip_compare(
++		&kea_lease_address($a),
++		&kea_lease_address($b))
++	} @rows;
++
++if (!@rows) {
++	print &ui_p("No inactive dynamic leases currently retained by Kea.");
++	return;
++	}
++
++print &ui_columns_start([
++	"Address",
++	"ID",
++	"Identifier",
++	"Hostname",
++	"Type",
++	"Expires",
++	"State",
++	], 100);
++
++foreach my $lease (@rows) {
+ 	print &ui_columns_row([
+ 		&html_escape(&kea_lease_address($lease)),
+ 		&html_escape($lease->{'subnet_id'} || ""),
+ 		&html_escape(&kea_lease_identifier($lease)),
+ 		&html_escape($lease->{'hostname'} || ""),
++		"Dynamic",
+ 		&html_escape(&kea_lease_expires($lease)),
+ 		&html_escape(&kea_lease_state($lease)),
+ 		]);
+ 	}
++
++print &ui_columns_end();
++}
++
++# print_reserved_addresses(version)
++# Shows every configured reservation, independently of lease lifetime.
++sub print_reserved_addresses
++{
++my ($ver) = @_;
++
++my ($leases, $err) = &kea_current_leases($ver);
++my $reservations = &kea_runtime_all_reservations($ver);
++
++print &ui_subheading(&text('comp_dhcp'.$ver));
++&print_lease_error_notice($err);
++return if ($err);
++
++my %lease_by_addr;
++foreach my $lease (@$leases) {
++	my $addr = &kea_lease_address($lease);
++	$lease_by_addr{$addr} = $lease if ($addr);
++	}
++
++my @rows;
++
++foreach my $r (@$reservations) {
++	my $addr = &kea_runtime_reservation_address($r);
++	next if (!$addr);
++
++	my $lease = $lease_by_addr{$addr};
++	my $active = $lease && &kea_lease_is_active($lease);
++
++	push(@rows, {
++		'address' => $addr,
++		'id' => $r->{'_subnet_id'} || "",
++		'identifier' => &kea_runtime_reservation_identifier($r),
++		'hostname' => $r->{'hostname'} ||
++			      ($lease ? ($lease->{'hostname'} || "") : ""),
++		'status' => $active ? "Active lease" : "No active lease",
++		'expires' => $active ? &kea_lease_expires($lease) : "",
++		});
++	}
++
++@rows = sort {
++	&kea_runtime_ip_compare($a->{'address'}, $b->{'address'})
++	} @rows;
++
++print &ui_columns_start([
++	"Address",
++	"ID",
++	"Identifier",
++	"Hostname",
++	"Status",
++	"Expires",
++	], 100);
++
++foreach my $row (@rows) {
++	print &ui_columns_row([
++		&html_escape($row->{'address'}),
++		&html_escape($row->{'id'}),
++		&html_escape($row->{'identifier'}),
++		&html_escape($row->{'hostname'}),
++		&html_escape($row->{'status'}),
++		&html_escape($row->{'expires'}),
++		]);
++	}
++
++print &ui_columns_end();
++}
++
++# kea_runtime_ipv4_to_int(address)
++sub kea_runtime_ipv4_to_int
++{
++my ($ip) = @_;
++
++my @p = split(/\./, $ip || "");
++return undef if (@p != 4);
++return undef if (grep { $_ !~ /^\d+$/ || $_ < 0 || $_ > 255 } @p);
++
++return ($p[0] << 24) +
++       ($p[1] << 16) +
++       ($p[2] << 8) +
++       $p[3];
++}
++
++# kea_runtime_int_to_ipv4(integer)
++sub kea_runtime_int_to_ipv4
++{
++my ($n) = @_;
++
++return join(".",
++	($n >> 24) & 255,
++	($n >> 16) & 255,
++	($n >> 8) & 255,
++	$n & 255);
++}
++
++# print_free_addresses()
++# Shows DHCPv4 pool addresses that are not reserved and have no active lease.
++# Expired ordinary dynamic leases are considered available again.
++sub print_free_addresses
++{
++my $ver = 4;
++
++my (undef, $root, undef, $err) = &kea_read_dhcp_config($ver);
++my ($current, $lerr) = &kea_current_leases($ver);
++my $reservations = &kea_runtime_all_reservations($ver);
++
++print &ui_subheading(&text('comp_dhcp'.$ver));
++
++if ($err || $lerr) {
++	print &ui_alert_box(
++		&html_escape($err || $lerr),
++		"warning", undef, undef, "");
++	return;
++	}
++
++my %reserved;
++foreach my $r (@$reservations) {
++	my $addr = &kea_runtime_reservation_address($r);
++	$reserved{$addr} = 1 if ($addr);
++	}
++
++my %active;
++my %inactive;
++
++foreach my $lease (@$current) {
++	my $addr = &kea_lease_address($lease);
++	next if (!$addr);
++
++	if (&kea_lease_is_active($lease)) {
++		$active{$addr} = $lease;
++		}
++	else {
++		$inactive{$addr} = $lease;
++		}
++	}
++
++my @free;
++
++foreach my $entry (&kea_all_subnets($root, 4)) {
++	my $subnet = $entry->{'subnet'};
++	my $sid = $subnet->{'id'} || "";
++
++	next if (ref($subnet->{'pools'}) ne 'ARRAY');
++
++	foreach my $pool (@{$subnet->{'pools'}}) {
++		my $range = $pool->{'pool'} || "";
++		next if ($range !~ /^\s*(\d+\.\d+\.\d+\.\d+)\s*-\s*(\d+\.\d+\.\d+\.\d+)\s*$/);
++
++		my $start = &kea_runtime_ipv4_to_int($1);
++		my $end = &kea_runtime_ipv4_to_int($2);
++
++		next if (!defined($start) || !defined($end) || $end < $start);
++
++		for (my $n = $start; $n <= $end; $n++) {
++			my $ip = &kea_runtime_int_to_ipv4($n);
++
++			next if ($reserved{$ip});
++			next if ($active{$ip});
++
++			my $old = $inactive{$ip};
++
++			push(@free, {
++				'address' => $ip,
++				'id' => $sid,
++				'identifier' => $old ?
++					&kea_lease_identifier($old) : "",
++				'hostname' => $old ?
++					($old->{'hostname'} || "") : "",
++				'note' => $old ?
++					"Free - previous lease inactive" :
++					"Free",
++				});
++			}
++		}
++	}
++
++@free = sort {
++	&kea_runtime_ip_compare($a->{'address'}, $b->{'address'})
++	} @free;
++
++print &ui_div("Addresses in configured DHCPv4 pools that are not reserved and do not have an active lease.");
++
++print &ui_columns_start([
++	"Address",
++	"ID",
++	"Previous identifier",
++	"Previous hostname",
++	"Status",
++	], 100);
++
++foreach my $row (@free) {
++	print &ui_columns_row([
++		&html_escape($row->{'address'}),
++		&html_escape($row->{'id'}),
++		&html_escape($row->{'identifier'}),
++		&html_escape($row->{'hostname'}),
++		&html_escape($row->{'note'}),
++		]);
++	}
++
+ print &ui_columns_end();
+ }
+ 

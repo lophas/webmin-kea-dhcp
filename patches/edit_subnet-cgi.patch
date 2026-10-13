@@ -1,0 +1,36 @@
+--- a/kea-dhcp/edit_subnet.cgi
++++ b/kea-dhcp/edit_subnet.cgi
+@@ -1,4 +1,4 @@
+-#!/usr/local/bin/perl
++#!/usr/bin/perl
+ # Edit or create a Kea subnet.
+ 
+ use strict;
+@@ -206,6 +206,27 @@
+ my ($reservations, $ver) = @_;
+ $reservations = [ ] if (ref($reservations) ne 'ARRAY');
+ 
++# Display DHCPv4 reservations in numeric IPv4 order without changing
++# the underlying Kea configuration order.
++if ($ver == 4) {
++	my @sorted = sort {
++		my @aa = split(/\./, $a->{'ip-address'} || "");
++		my @bb = split(/\./, $b->{'ip-address'} || "");
++
++		my $cmp = 0;
++		for my $i (0 .. 3) {
++			my $av = defined($aa[$i]) && $aa[$i] =~ /^\d+$/ ? $aa[$i] : -1;
++			my $bv = defined($bb[$i]) && $bb[$i] =~ /^\d+$/ ? $bb[$i] : -1;
++
++			$cmp = $av <=> $bv;
++			last if ($cmp);
++			}
++		$cmp;
++		} @$reservations;
++
++	$reservations = \@sorted;
++	}
++
+ # Kea accepts different reservation identifiers per protocol; the dropdown is
+ # limited to identifiers that the selected daemon can actually use.
+ my @types = $ver == 6 ?
