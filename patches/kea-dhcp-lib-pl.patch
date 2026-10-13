@@ -95,7 +95,7 @@
 +my $leases =
 +	ref($data->{'arguments'}) eq 'HASH' &&
 +	ref($data->{'arguments'}->{'leases'}) eq 'ARRAY' ?
-+		$data->{'arguments'}->{'leases'} : [ ];
++	$data->{'arguments'}->{'leases'} : [ ];
 +
 +return ($leases, undef, "live");
 +}
